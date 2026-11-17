@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+import sqlite3
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -15,34 +16,73 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
+DB_PATH = Path(__file__).parent.parent / "bluestock_mf.db"
 
 # ─────────────────────────────────────────────
-# LOAD DATA (cached)
-# Verified column names from actual CSVs:
-#   06_industry_folio_count: month, total_folios_crore, equity_folios_crore, ...
-#   04_monthly_sip_inflows:  month, sip_inflow_crore, sip_aum_lakh_crore, ...
-#   05_category_inflows:     month, category, net_inflow_crore
-#   03_aum_by_fund_house:    date, fund_house, aum_lakh_crore, aum_crore, num_schemes
-#   07_scheme_performance:   amfi_code, scheme_name, fund_house, category, plan,
-#                            return_1yr_pct, return_3yr_pct, sharpe_ratio,
-#                            std_dev_ann_pct, aum_crore, risk_grade, ...
-#   08_investor_transactions: investor_id, transaction_date, amfi_code,
-#                             transaction_type, amount_inr, state, city,
-#                             city_tier, age_group, gender, ...
+# LOAD DATA FROM SQLITE (cached)
+# The ETL script creates these table names from the processed CSV filenames:
+# fund_master, nav_history, aum_by_fund_house, monthly_sip_inflows,
+# category_inflows, industry_folio_count, scheme_performance,
+# investor_transactions, portfolio_holdings.
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    fund_master  = pd.read_csv(DATA_DIR / "01_fund_master.csv")
-    nav_history  = pd.read_csv(DATA_DIR / "02_nav_history.csv", parse_dates=["date"])
-    aum_fh       = pd.read_csv(DATA_DIR / "03_aum_by_fund_house.csv")
-    sip_inflows  = pd.read_csv(DATA_DIR / "04_monthly_sip_inflows.csv")
-    cat_inflows  = pd.read_csv(DATA_DIR / "05_category_inflows.csv")
-    folio        = pd.read_csv(DATA_DIR / "06_industry_folio_count.csv")
-    performance  = pd.read_csv(DATA_DIR / "07_scheme_performance.csv")
-    transactions = pd.read_csv(DATA_DIR / "08_investor_transactions.csv", parse_dates=["transaction_date"])
-    holdings     = pd.read_csv(DATA_DIR / "09_portfolio_holdings.csv")
-    return fund_master, nav_history, aum_fh, sip_inflows, cat_inflows, folio, performance, transactions, holdings
+    if not DB_PATH.exists():
+        raise FileNotFoundError(
+            f"SQLite database not found at {DB_PATH}. "
+            "Run the ETL script first to create and populate it."
+        )
+
+    with sqlite3.connect(DB_PATH) as conn:
+        # Retrieve the dashboard datasets with SQL rather than rereading CSV files.
+        fund_master = pd.read_sql_query(
+            "SELECT * FROM fund_master", conn
+        )
+        # Join NAV observations to fund metadata so each record carries its scheme details.
+        nav_history = pd.read_sql_query(
+            """
+            SELECT
+                n.amfi_code,
+                n.date,
+                n.nav,
+                f.scheme_name,
+                f.category,
+                f.fund_house
+            FROM nav_history AS n
+            LEFT JOIN fund_master AS f
+                ON f.amfi_code = n.amfi_code
+            ORDER BY n.amfi_code, n.date
+            """,
+            conn,
+            parse_dates=["date"],
+        )
+        aum_fh = pd.read_sql_query(
+            "SELECT * FROM aum_by_fund_house", conn
+        )
+        sip_inflows = pd.read_sql_query(
+            "SELECT * FROM monthly_sip_inflows", conn
+        )
+        cat_inflows = pd.read_sql_query(
+            "SELECT * FROM category_inflows", conn
+        )
+        folio = pd.read_sql_query(
+            "SELECT * FROM industry_folio_count", conn
+        )
+        performance = pd.read_sql_query(
+            "SELECT * FROM scheme_performance", conn
+        )
+        transactions = pd.read_sql_query(
+            "SELECT * FROM investor_transactions", conn,
+            parse_dates=["transaction_date"],
+        )
+        holdings = pd.read_sql_query(
+            "SELECT * FROM portfolio_holdings", conn
+        )
+
+    return (
+        fund_master, nav_history, aum_fh, sip_inflows, cat_inflows,
+        folio, performance, transactions, holdings
+    )
 
 fund_master, nav_history, aum_fh, sip_inflows, cat_inflows, folio, performance, transactions, holdings = load_data()
 
